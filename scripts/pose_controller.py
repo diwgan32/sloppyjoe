@@ -38,7 +38,8 @@ class PoseController:
 
         self.trans_listener = tf.TransformListener()
 
-        rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
+        #rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
+        rospy.Subscriber('/cmd_nav', Pose2D, self.cmd_pose_callback)
 
     def cmd_pose_callback(self, data):
         self.x_g = data.x
