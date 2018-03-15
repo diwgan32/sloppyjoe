@@ -74,6 +74,8 @@ class Detector:
         rospy.Subscriber('/camera/camera_info', CameraInfo, self.camera_info_callback)
         rospy.Subscriber('/scan', LaserScan, self.laser_callback)
 
+        self.animal_publisher = rospy.Publisher('/detector/animals', DetectedObject, queue_size=10)
+
     def run_detection(self, img):
         """ runs a detection method in a given image """
 
@@ -234,20 +236,43 @@ class Detector:
                 # estimate the corresponding distance using the lidar
                 dist = self.estimate_distance(thetaleft,thetaright,img_laser_ranges)
 
-                if not self.object_publishers.has_key(cl):
+                if (not self.object_publishers.has_key(cl)) and (cl == 13):
+
                     self.object_publishers[cl] = rospy.Publisher('/detector/'+self.object_labels[cl],
                         DetectedObject, queue_size=10)
 
-                # publishes the detected object and its location
-                object_msg = DetectedObject()
-                object_msg.id = cl
-                object_msg.name = self.object_labels[cl]
-                object_msg.confidence = sc
-                object_msg.distance = dist
-                object_msg.thetaleft = thetaleft
-                object_msg.thetaright = thetaright
-                object_msg.corners = [ymin,xmin,ymax,xmax]
-                self.object_publishers[cl].publish(object_msg)
+                     # publishes the detected object and its location
+                    object_msg = DetectedObject()
+                    object_msg.id = cl
+                    object_msg.name = self.object_labels[cl]
+                    object_msg.confidence = sc
+                    object_msg.distance = dist
+                    object_msg.thetaleft = thetaleft
+                    object_msg.thetaright = thetaright
+                    object_msg.corners = [ymin,xmin,ymax,xmax]
+                    self.object_publishers[cl].publish(object_msg)
+                elif (cl >= 17 and cl <= 25):
+                    # publishes the detected object and its location
+                    object_msg = DetectedObject()
+                    object_msg.id = cl
+                    object_msg.name = self.object_labels[cl]
+                    object_msg.confidence = sc
+                    object_msg.distance = dist
+                    object_msg.thetaleft = thetaleft
+                    object_msg.thetaright = thetaright
+                    object_msg.corners = [ymin,xmin,ymax,xmax]
+                    self.animal_publisher.publish(object_msg)
+
+                    print self.object_labels[cl]
+                    print 'bounding box'
+                    print [ymin, xmin, ymax, xmax]
+                    print 'pixel height'
+                    print ymax - ymin
+                else:
+                    continue
+                    
+
+               
 
         # displays the camera image
         cv2.imshow("Camera", img_bgr8)

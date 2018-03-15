@@ -1,152 +1,334 @@
 #!/usr/bin/env python
-
+ 
 import rospy
 from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Float32MultiArray, String
-from geometry_msgs.msg import Twist, PoseArray, Pose2D
+from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
+from sensor_msgs.msg import CameraInfo
 from asl_turtlebot.msg import DetectedObject
 import tf
 import math
 from enum import Enum
-
-# hardcoded pose goal
-x_g = 1.5
-y_g = -4.0
-theta_g = 0
-
+import numpy as np
+import time
+ 
 # threshold at which we consider the robot at a location
 POS_EPS = .1
-THETA_EPS = .15
-
+THETA_EPS = .75
+ 
 # time to stop at a stop sign
-STOP_TIME = 3
-
+STOP_TIME = 7
+ 
 # minimum distance from a stop sign to obey it
 STOP_MIN_DIST = .5
-
+ 
+#minimum distance from cat to log it
+CAT_MIN_DIST = 0.7
+ 
 # time taken to cross an intersection
 CROSSING_TIME = 3
-
+ 
 # state machine modes, not all implemented
 class Mode(Enum):
-    IDLE = 1
-    POSE = 2
-    STOP = 3
-    CROSS = 4
-    NAV = 5
-    MANUAL = 6
-
+	IDLE = 1
+	POSE = 2
+	STOP = 3
+	CROSS = 4
+	NAV = 5
+	MANUAL = 6
+	CAT = 7
+ 
 class Supervisor:
-    """ the state machine of the turtlebot """
+	""" the state machine of the turtlebot """
+ 
+	def __init__(self):
+		rospy.init_node('turtlebot_supervisor', anonymous=True)
+ 
+		# current pose
+		self.x = 0
+		self.y = 0
+		self.theta = 0
+ 
+		# pose goal
+		self.x_g = 0
+		self.y_g = 0
+		self.theta_g = 0
+ 
+		self.start_time = time.time()
+ 
+		self.cat_height = 4.0 * .0254
+		self.camera_intrinsics = None
+ 
+		# current mode
+		self.mode = Mode.IDLE
+		self.last_mode_printed = None
+ 
+		self.nav_goal_publisher = rospy.Publisher('/cmd_nav', Pose2D, queue_size=10)
+		self.pose_goal_publisher = rospy.Publisher('/cmd_pose', Pose2D, queue_size=10)
+		self.cmd_vel_publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+		self.cat_location_publisher = rospy.Publisher('/cat_loc', Pose2D, queue_size=10)
+ 
+		rospy.Subscriber('/detector/stop_sign', DetectedObject, self.stop_sign_detected_callback)
+		rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.rviz_goal_callback)
+		rospy.Subscriber('/detector/animals', DetectedObject, self.cat_detector_callback)
+		rospy.Subscriber('/camera/camera_info', CameraInfo, self.camera_info_callback)
+ 
+		self.goal_bool = [False, False]
+		self.goal_number = 0
+ 
+		self.goals = np.array([[8.5, 33, np.pi/2], [13.5, 38.5, 0]])
+ 
+		self.trans_listener = tf.TransformListener()
+		self.focal_length = None
+ 
+	def inch_to_meter_pose(self, pose):
+		return np.array([pose[0]*.0254, pose[1]*.0254, pose[2]])
+ 
+	def meter_to_inch_pose(self, pose):
+		return np.array([pose[0]/.0254, pose[1]/.0254, pose[2]])
+ 
+	def height_to_dist(self, height):
+		return self.focal_length * self.cat_height/height
+ 
+	def rviz_goal_callback(self, msg):
+		""" callback for a pose goal sent through rviz """
+ 
+		self.x_g = msg.pose.position.x
+		self.y_g = msg.pose.position.y
+		rotation = [msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w]
+		euler = tf.transformations.euler_from_quaternion(rotation)
+		self.theta_g = euler[2]
+		self.mode = Mode.NAV
+ 
+	def stop_sign_detected_callback(self, msg):
+		""" callback for when the detector has found a stop sign. Note that
+		a distance of 0 can mean that the lidar did not pickup the stop sign at all """
+ 
+		# distance of the stop sign
+		dist = msg.distance
+		# if close enough and in nav mode, stop
+		if dist >= 0 and dist < STOP_MIN_DIST and self.mode == Mode.NAV:
+			self.init_stop_sign()
+ 
+	def cat_detector_callback(self, msg):
+		dist = msg.distance
+		self.log_cat(msg.corners)
+ 
+	def camera_info_callback(self, msg):
+		self.focal_length = msg.K[4]
+		self.camera_intrinsics = np.linalg.inv(np.array([[msg.K[0], msg.K[1], msg.K[2]],
+										   				 [msg.K[3], msg.K[4], msg.K[5]], 
+										   				 [msg.K[6], msg.K[7], msg.K[8]]]))
+		
+ 
+	def go_to_pose(self):
+		""" sends the current desired pose to the pose controller """
+ 
+		pose_g_msg = Pose2D()
+		pose_g_msg.x = self.x_g
+		pose_g_msg.y = self.y_g
+		pose_g_msg.theta = self.theta_g
+ 
+		self.pose_goal_publisher.publish(pose_g_msg)
+ 
+	def nav_to_pose(self):
+		""" sends the current desired pose to the naviagtor """
+ 
+		nav_g_msg = Pose2D()
+		nav_g_msg.x = self.x_g
+		nav_g_msg.y = self.y_g
+		nav_g_msg.theta = self.theta_g
+ 
+		self.nav_goal_publisher.publish(nav_g_msg)
+ 
+	def nav_to_pose_goal(self):
+		""" sends the current desired pose to the naviagtor """
+		pose = self.inch_to_meter_pose(self.goals[self.goal_number])
+		nav_g_msg = Pose2D()
+		nav_g_msg.x = pose[0]
+		nav_g_msg.y = pose[1]
+		nav_g_msg.theta = pose[2]
+		self.nav_goal_publisher.publish(nav_g_msg)
+ 
+	def stay_idle(self):
+		""" sends zero velocity to stay put """
+ 
+		vel_g_msg = Twist()
+		self.cmd_vel_publisher.publish(vel_g_msg)
+ 
+	def close_to(self,x,y,theta):
+		""" checks if the robot is at a pose within some threshold """
+ 
+		return (abs(x-self.x)<POS_EPS and abs(y-self.y)<POS_EPS and abs(theta-self.theta)<THETA_EPS)
+ 
+	def init_stop_sign(self):
+		""" initiates a stop sign maneuver """
+ 
+		self.stop_sign_start = rospy.get_rostime()
+		self.mode = Mode.STOP
+ 
+	def init_cat(self):
+ 
+		#self.cat_start = rospy.get_rostime()
+		self.mode = Mode.CAT
+ 
+	def log_cat(self, corners):
+	
+		#first, compute distance
+		#(corner, h1, h2, w1, w2)
+		x_1 = corners[2]
+		x_2 = corners[3]
 
-    def __init__(self):
-        rospy.init_node('turtlebot_supervisor', anonymous=True)
+		y_1 = corners[0] + 125.0
+		y_2 = corners[1] + 125.0
 
-        # current pose
-        self.x = 0
-        self.y = 0
-        self.theta = 0
+		d = self.height_to_dist(y_2-y_1)
+		print "distance: ", d
+		# get the image coordinages 
+		x_im = (x_2 + x_1)/2.0
+		y_im = (y_2 + y_1)/2.0
 
-        # current mode
-        self.mode = Mode.POSE
-        self.last_mode_printed = None
+		im_vec = np.array([x_im, y_im, 1.0])
 
-        self.pose_goal_publisher = rospy.Publisher('/cmd_pose', Pose2D, queue_size=10)
-        rospy.Subscriber('/detector/stop_sign', DetectedObject, self.stop_sign_detected_callback)
-        rospy.Subscriber('/gazebo/model_states', ModelStates, self.gazebo_callback)
+		im_robot = np.matmul(self.camera_intrinsics, im_vec)
+		im_robot *= d
+		th = self.theta
+		# Rotate from robot to world frame and add the robot pose
+		R = np.array([[np.cos(th), -np.sin(th)],
+					  [np.sin(th), np.cos(th)]])
 
-    def gazebo_callback(self, msg):
-        """ callback for state of the turtlebot from Gazebo """
+		im_world = np.matmul(R, im_robot[:2])
 
-        pose = msg.pose[msg.name.index("turtlebot3_burger")]
-        twist = msg.twist[msg.name.index("turtlebot3_burger")]
-        self.x = pose.position.x
-        self.y = pose.position.y
-        quaternion = (
-            pose.orientation.x,
-            pose.orientation.y,
-            pose.orientation.z,
-            pose.orientation.w)
-        euler = tf.transformations.euler_from_quaternion(quaternion)
-        self.theta = euler[2]
-
-    def stop_sign_detected_callback(self, msg):
-        """ callback for when the detector has found a stop sign. Note that
-        a distance of 0 can mean that the lidar did not pickup the stop sign at all
-        so you shouldn't necessarily stop then """
-
-        ### YOUR CODE HERE ###
-
-        pass
-
-        ### END OF YOUR CODE ###
-
-    def close_to(self,x,y,theta):
-        """ checks if the robot is at a pose within some threshold """
-
-        return (abs(x-self.x)<POS_EPS and abs(y-self.y)<POS_EPS and abs(theta-self.theta)<THETA_EPS)
-
-    def go_to_pose(self):
-        """ sends the current desired pose to the pose controller """
-
-        pose_g_msg = Pose2D()
-        pose_g_msg.x = x_g
-        pose_g_msg.y = y_g
-        pose_g_msg.theta = theta_g
-
-        self.pose_goal_publisher.publish(pose_g_msg)
-
-    def loop(self):
-        """ the main loop of the robot. At each iteration, depending on its
-        mode (i.e. the finite state machine's state), if takes appropriate
-        actions. This function shouldn't return anything """
-
-        # logs the current mode
-        if not(self.last_mode_printed == self.mode):
-            rospy.loginfo("Current Mode: %s", self.mode)
-            self.last_mode_printed = self.mode
-
-        # checks wich mode it is in and acts accordingly
-        if self.mode == Mode.IDLE:
-            # not doing anything
-            pass
-
-        elif self.mode == Mode.POSE:
-            # moving towards a desired pose
-            if self.close_to(x_g,y_g,theta_g):
-                self.mode = Mode.IDLE
-            else:
-                self.go_to_pose()
-
-        elif self.mode == Mode.STOP:
-            # at a stop sign
-
-            ### YOUR CODE HERE ###
-
-            pass
-
-            ### END OF YOUR CODE ###
-
-
-        elif self.mode == Mode.CROSS:
-            # crossing an intersection
-
-            ### YOUR CODE HERE ###
-
-            pass
-
-            ### END OF YOUR CODE ###
-
-        else:
-            raise Exception('This mode is not supported: %s'
-                % str(self.mode))
-
-    def run(self):
-        rate = rospy.Rate(5) # 5 Hz
-        while not rospy.is_shutdown():
-            self.loop()
-            rate.sleep()
-
+		im_world[0] += self.x
+		im_world[1] += self.y
+		#print im_world, "imworld", theta
+		# Logs the cat position in world
+		cat_loc_msg = Pose2D()
+		cat_loc_msg.x = im_world[0]
+		cat_loc_msg.y = im_world[1]
+		cat_loc_msg.theta = self.theta
+ 
+		self.cat_location_publisher.publish(cat_loc_msg)
+ 
+ 
+ 
+	def has_stopped(self):
+		""" checks if stop sign maneuver is over """
+ 
+		return (self.mode == Mode.STOP and (rospy.get_rostime()-self.stop_sign_start)>rospy.Duration.from_sec(STOP_TIME))
+ 
+ 
+	def init_crossing(self):
+		""" initiates an intersection crossing maneuver """
+ 
+		self.cross_start = rospy.get_rostime()
+		self.mode = Mode.CROSS
+ 
+	def has_crossed(self):
+		""" checks if crossing maneuver is over """
+ 
+		return (self.mode == Mode.CROSS and (rospy.get_rostime()-self.cross_start)>rospy.Duration.from_sec(CROSSING_TIME))
+ 
+	def loop(self):
+		""" the main loop of the robot. At each iteration, depending on its
+		mode (i.e. the finite state machine's state), if takes appropriate
+		actions. This function shouldn't return anything """
+ 
+		try:
+			(translation,rotation) = self.trans_listener.lookupTransform('/map', '/base_footprint', rospy.Time(0))
+			self.x = translation[0]
+			self.y = translation[1]
+			euler = tf.transformations.euler_from_quaternion(rotation)
+			self.theta = euler[2]
+		except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+			pass
+ 
+		#if time.time() - self.start_time > 10.0 and \
+		#   (self.goal_bool[self.goal_number] == False):
+		#	self.mode = Mode.NAV
+ 
+		if (all(val for val in self.goal_bool)):
+			self.mode = Mode.IDLE
+ 
+		# logs the current mode
+		if not(self.last_mode_printed == self.mode):
+			rospy.loginfo("Current Mode: %s", self.mode)
+			self.last_mode_printed = self.mode
+ 
+		# checks wich mode it is in and acts accordingly
+		if self.mode == Mode.IDLE:
+			# send zero velocity
+			self.stay_idle()
+ 
+		elif self.mode == Mode.POSE:
+			# moving towards a desired pose
+			if self.close_to(self.x_g,self.y_g,self.theta_g):
+				self.mode = Mode.IDLE
+			else:
+				self.go_to_pose()
+ 
+		elif self.mode == Mode.STOP:
+			# at a stop sign
+			print 'hi'
+			self.stay_idle()
+			if self.has_stopped():
+				self.init_crossing()
+ 
+		elif self.mode == Mode.CROSS:
+			# crossing an intersection
+			if self.has_crossed():
+				self.mode = Mode.NAV
+			else:
+				self.nav_to_pose()
+ 
+		elif self.mode == Mode.NAV:
+			print self.goals[self.goal_number],\
+				 self.meter_to_inch_pose(np.array([self.x, self.y, self.theta]))
+			if self.close_to(self.goals[self.goal_number][0],\
+							 self.goals[self.goal_number][1],\
+							 self.goals[self.goal_number][2]):
+				self.stay_idle()
+				time.sleep(1)
+				self.goal_bool[self.goal_number] = True
+				self.goal_number += 1
+			else:
+				self.nav_to_pose_goal()
+ 
+		elif self.mode == Mode.CAT:
+			self.log_cat()
+			self.mode = Mode.NAV
+ 
+		else:
+			raise Exception('This mode is not supported: %s'
+				% str(self.mode))
+ 
+	def run(self):
+		rate = rospy.Rate(10) # 10 Hz
+		while not rospy.is_shutdown():
+			self.loop()
+			rate.sleep()
+ 
 if __name__ == '__main__':
-    sup = Supervisor()
-    sup.run()
+	sup = Supervisor()
+	sup.run()
+ 
+# Thhings to ask ED:
+# - Cat detection is bad
+# - How are we supposed to do turns
+# - Whats the best way to autonomously explore
+# - Why is our robot keep running into obstacles. Shouldn't A* take care of things
+ 
+ 
+# current crop - 100px top, 150px bottom
+# 22in away, cat is 6in off the ground- first trial (19, 84, 73, 169),
+# 19.5in cat is 6 in off the ground- ssecond trial (5, 104, 70, 200), 94
+# 22in away, cat is 6in off the ground (19, 98, 70, 175), at an angle
+# 31in away, cat is 6in off the ground (50, 118, 90, 177) straight ahead
+# new cat, is 4.5in tall, 88px tall, 18in away
+# cat #2, is 4.5in tall
+ 
+ 
+# stop sign:
+# the height was 64. stop sign was 13.5 in away
+# 75px tall, stop sign was 10.5in
+# 41p ttall, stop sign was 24.25in away
