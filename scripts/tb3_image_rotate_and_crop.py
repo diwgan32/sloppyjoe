@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import CompressedImage, CameraInfo
 
-CHOP_TOP = 100
-CHOP_BOT = 220
+CHOP_TOP = 10
+CHOP_BOT = 240
 
 class ImageTransformer:
 

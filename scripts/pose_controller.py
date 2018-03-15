@@ -10,6 +10,10 @@ from numpy import linalg
 from utils import wrapToPi
 
 # control gains
+# K1 = 0.4
+# K2 = 0.8
+# K3 = 0.8
+
 K1 = 0.4
 K2 = 0.8
 K3 = 0.8
@@ -38,7 +42,8 @@ class PoseController:
 
         self.trans_listener = tf.TransformListener()
 
-        rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
+        #rospy.Subscriber('/cmd_pose', Pose2D, self.cmd_pose_callback)
+        rospy.Subscriber('/cmd_nav', Pose2D, self.cmd_pose_callback)
 
     def cmd_pose_callback(self, data):
         self.x_g = data.x
@@ -69,8 +74,8 @@ class PoseController:
         alpha = angs[0]
         delta = angs[1]
 
-        V = K1*rho*np.cos(alpha)
-        om = K2*alpha + K1*np.sinc(2*alpha/np.pi)*(alpha+K3*delta)
+        V = .25*K1*rho*np.cos(alpha)
+        om = .25*K2*alpha + K1*np.sinc(2*alpha/np.pi)*(alpha+K3*delta)
 
         # Apply saturation limits
         cmd_x_dot = np.sign(V)*min(V_MAX, np.abs(V))
