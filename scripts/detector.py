@@ -240,7 +240,7 @@ class Detector:
 
                     self.object_publishers[cl] = rospy.Publisher('/detector/'+self.object_labels[cl],
                         DetectedObject, queue_size=10)
-
+                if (cl == 13):
                      # publishes the detected object and its location
                     object_msg = DetectedObject()
                     object_msg.id = cl

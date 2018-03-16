@@ -1,7 +1,11 @@
 <launch>
+    <arg name="camera_fps" default="5" />
+
     <include file="$(find turtlebot3_bringup)/launch/turtlebot3_core.launch" />
     <include file="$(find velodyne_pointcloud)/launch/VLP16_points.launch" />
-    <include file="$(find raspicam_node)/launch/camerav2_410x308_30fps.launch" />
+    <include file="$(find asl_turtlebot)/launch/raspicam_camerav2_410x308_variable_fps.launch">
+        <arg name="camera_fps" value="$(arg camera_fps)" />
+    </include>
     <node pkg="asl_turtlebot" type="tb3_image_rotate_and_crop.py" name="image_rotater" />
     <node pkg="tf" type="static_transform_publisher" name="camera_true_broadcaster" args="0.03 0 0.067 0.707107 0 0.707107 0 base_footprint raspicam 100" />
     <node pkg="tf" type="static_transform_publisher" name="camera_broadcaster" args="0 0 0 0 0 0.707107 0.707107 raspicam camera 100" />

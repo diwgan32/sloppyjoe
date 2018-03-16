@@ -84,6 +84,7 @@ class Navigator:
         self.nav_pose_pub = rospy.Publisher('/cmd_pose', Pose2D, queue_size=10)
         self.nav_pathsp_pub = rospy.Publisher('/cmd_path_sp', PoseStamped, queue_size=10)
         self.nav_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+        self.path_fail_pub = rospy.Publisher('/path_failure', String, queue_size = 10)
 
         self.trans_listener = tf.TransformListener()
 
@@ -217,6 +218,7 @@ class Navigator:
                     rospy.logwarn("Navigator: Path too short, not updating")
             else:
                 rospy.logwarn("Navigator: Could not find path")
+                self.path_fail_pub.publish("FAIL")
                 self.current_plan = []
 
         # if we have a path, execute it (we need at least 3 points for this controller)
